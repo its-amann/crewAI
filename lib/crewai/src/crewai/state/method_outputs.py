@@ -40,11 +40,19 @@ def record_output_types(entry: Any) -> Any:
     """
     if not isinstance(entry, dict):
         return entry
+    from crewai.flow.human_feedback import HumanFeedbackResult
+
     recorded = dict(entry)
     for key, type_key in _TYPE_KEYS.items():
         value = entry.get(key)
         if isinstance(value, BaseModel) or dataclasses.is_dataclass(value):
             recorded[type_key] = _type_path(type(value))
+        # A feedback result keeps the reviewed method output in its own ``output``.
+        inner = getattr(value, "output", None)
+        if isinstance(value, HumanFeedbackResult) and (
+            isinstance(inner, BaseModel) or dataclasses.is_dataclass(inner)
+        ):
+            recorded[f"{type_key}_output"] = _type_path(type(inner))
     return recorded
 
 
@@ -71,23 +79,31 @@ def rebuild_output_types(entry: dict[str, Any], declared: list[Any]) -> dict[str
 
     rebuilt = dict(entry)
     for key, type_key in _TYPE_KEYS.items():
+        inner_path = rebuilt.pop(f"{type_key}_output", None)
         if type_key not in rebuilt:
             continue
         path = rebuilt.pop(type_key)
-        cls = allowed.get(path)
-        if cls is None:
-            logger.warning(
-                "Method output type %r is not a return type the flow declares; "
-                "keeping JSON. Annotate the method's return type to restore it.",
-                path,
-            )
-            continue
-        try:
-            rebuilt[key] = TypeAdapter(cls).validate_python(rebuilt[key])
-        except (PydanticSchemaGenerationError, ValidationError):
-            logger.warning(
-                "Method output no longer validates as %r; keeping JSON.",
-                path,
-                exc_info=True,
-            )
+        rebuilt[key] = _rebuild(rebuilt[key], path, allowed)
+        if inner_path is not None and hasattr(rebuilt[key], "output"):
+            rebuilt[key].output = _rebuild(rebuilt[key].output, inner_path, allowed)
     return rebuilt
+
+
+def _rebuild(value: Any, path: str, allowed: dict[str, type]) -> Any:
+    cls = allowed.get(path)
+    if cls is None:
+        logger.warning(
+            "Method output type %r is not a return type the flow declares; "
+            "keeping JSON. Annotate the method's return type to restore it.",
+            path,
+        )
+        return value
+    try:
+        return TypeAdapter(cls).validate_python(value)
+    except (PydanticSchemaGenerationError, ValidationError):
+        logger.warning(
+            "Method output no longer validates as %r; keeping JSON.",
+            path,
+            exc_info=True,
+        )
+        return value

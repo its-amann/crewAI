@@ -1153,6 +1153,19 @@ class _ReviewFlow(Flow):
         self.state["feedback"] = result.feedback
 
 
+class _QuoteReviewFlow(Flow):
+    @start()
+    @human_feedback(message="Approve?", provider=_ApproveProvider())
+    def ask(self) -> _Quote:
+        return _Quote(amount=42)
+
+    @listen(ask)
+    def record(self, result: Any) -> None:
+        if _PENDING_FAILURES:
+            raise RuntimeError(_PENDING_FAILURES.pop())
+        self.state["charged"] = result.output.amount
+
+
 def _checkpoint_after_listener_failure(flow_cls: type[Flow], directory: Path) -> str:
     """Run ``flow_cls`` once with its listener failing; return the last checkpoint."""
     _PENDING_FAILURES[:] = ["listener failed once"]
@@ -1201,6 +1214,18 @@ class TestRestoredMethodOutputTypes:
         restored.kickoff()
 
         assert restored.state["feedback"] == "looks good"
+
+    def test_human_feedback_output_keeps_its_type_after_restore(
+        self, tmp_path: Path
+    ) -> None:
+        latest = _checkpoint_after_listener_failure(_QuoteReviewFlow, tmp_path)
+
+        restored = _QuoteReviewFlow.from_checkpoint(
+            CheckpointConfig(restore_from=latest)
+        )
+        restored.kickoff()
+
+        assert restored.state["charged"] == 42
 
     def test_restore_never_builds_a_type_the_flow_does_not_declare(
         self, tmp_path: Path
